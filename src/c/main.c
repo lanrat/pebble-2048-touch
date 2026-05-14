@@ -10,6 +10,7 @@
 #include "game.h"
 #include "ui.h"
 #include "input.h"
+#include "idle.h"
 
 static Window *s_window;
 
@@ -31,9 +32,12 @@ static void init(void) {
 #ifdef PBL_TOUCH
   input_touch_subscribe();
 #endif
+
+  idle_init();
 }
 
 static void deinit(void) {
+  idle_deinit();
 #ifdef PBL_TOUCH
   input_touch_unsubscribe();
 #endif

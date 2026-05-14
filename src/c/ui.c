@@ -8,6 +8,7 @@ static TextLayer *s_score_layer;
 static TextLayer *s_status_layer;  // "Game over" / "You win!" / "2048!" banner
 static TextLayer *s_confirm_overlay;  // "Reset Game?" prompt overlay
 static bool s_confirm_visible;
+static TextLayer *s_idle_overlay;     // inactivity warning overlay
 
 // Backing storage for the score TextLayer. TextLayer doesn't copy strings, so
 // this buffer must outlive every set_text call.
@@ -465,6 +466,19 @@ void ui_window_load(Window *window) {
   layer_add_child(root, text_layer_get_layer(s_confirm_overlay));
   layer_set_hidden(text_layer_get_layer(s_confirm_overlay), true);
 
+  // Inactivity warning overlay. Same geometry as the reset confirm overlay.
+  s_idle_overlay = text_layer_create(GRect(0, confirm_y,
+                                           bounds.size.w, confirm_h));
+  text_layer_set_text(s_idle_overlay,
+                      "Still there?\n\nPress any key\nto continue");
+  text_layer_set_text_alignment(s_idle_overlay, GTextAlignmentCenter);
+  text_layer_set_font(s_idle_overlay,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_background_color(s_idle_overlay, GColorWhite);
+  text_layer_set_text_color(s_idle_overlay, GColorBlack);
+  layer_add_child(root, text_layer_get_layer(s_idle_overlay));
+  layer_set_hidden(text_layer_get_layer(s_idle_overlay), true);
+
   if (!game_load_persisted()) {
     game_reset();
   }
@@ -476,6 +490,7 @@ void ui_window_unload(Window *window) {
   text_layer_destroy(s_score_layer);
   text_layer_destroy(s_status_layer);
   text_layer_destroy(s_confirm_overlay);
+  text_layer_destroy(s_idle_overlay);
   layer_destroy(s_board_layer);
 }
 
@@ -498,4 +513,12 @@ void ui_dismiss_reset_confirm(void) {
 
 bool ui_reset_confirm_visible(void) {
   return s_confirm_visible;
+}
+
+void ui_show_idle_warning(void) {
+  layer_set_hidden(text_layer_get_layer(s_idle_overlay), false);
+}
+
+void ui_dismiss_idle_warning(void) {
+  layer_set_hidden(text_layer_get_layer(s_idle_overlay), true);
 }

@@ -19,6 +19,7 @@
 #include "input.h"
 #include "game.h"
 #include "ui.h"
+#include "idle.h"
 
 // All the discrete actions any button can trigger. Adding a new long-press
 // gesture (e.g., long-DOWN = some shortcut) means adding an action here and
@@ -74,6 +75,13 @@ static void dispatch_action(ButtonAction action) {
 
 static void short_handler(ClickRecognizerRef r, void *ctx) {
   ButtonId b = click_recognizer_get_button_id(r);
+  // A press while the inactivity warning is up only dismisses the warning;
+  // it must NOT also perform a game action.
+  if (idle_warning_visible()) {
+    idle_kick();
+    return;
+  }
+  idle_kick();
   // Any short press while the reset-confirm overlay is up either confirms
   // (SELECT) or cancels (others).
   if (ui_reset_confirm_visible()) {
@@ -88,6 +96,11 @@ static void short_handler(ClickRecognizerRef r, void *ctx) {
 
 static void long_handler(ClickRecognizerRef r, void *ctx) {
   ButtonId b = click_recognizer_get_button_id(r);
+  if (idle_warning_visible()) {
+    idle_kick();
+    return;
+  }
+  idle_kick();
   const ButtonBinding *bind = find_binding(b);
   if (bind) dispatch_action(bind->long_action);
 }
@@ -107,6 +120,15 @@ static int16_t s_touch_y0;
 static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
     case TouchEvent_Touchdown:
+      // If the inactivity warning is up, kick the idle timer and swallow the
+      // touch — by leaving s_touch_active false, the matching liftoff will
+      // be ignored and no swipe is interpreted.
+      if (idle_warning_visible()) {
+        idle_kick();
+        s_touch_active = false;
+        break;
+      }
+      idle_kick();
       s_touch_active = true;
       s_touch_x0 = event->x;
       s_touch_y0 = event->y;

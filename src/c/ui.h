@@ -31,3 +31,8 @@ void ui_hide_status(void);
 void ui_show_reset_confirm(void);
 void ui_dismiss_reset_confirm(void);
 bool ui_reset_confirm_visible(void);
+
+// Inactivity warning overlay. Shown by the idle module after the inactivity
+// threshold; dismissed when the user presses a button or touches the screen.
+void ui_show_idle_warning(void);
+void ui_dismiss_idle_warning(void);
