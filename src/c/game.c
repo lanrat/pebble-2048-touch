@@ -22,19 +22,21 @@ static int empty_count(void) {
 }
 
 // Spawn a single tile in a uniformly random empty cell. 90% chance of a "2"
-// (log2=1), 10% chance of a "4" (log2=2) — matches the original 2048.
-static void spawn_tile(void) {
+// (log2=1), 10% chance of a "4" (log2=2) — matches the original 2048. Returns
+// the cell index of the spawn, or -1 if the board was full.
+static int spawn_tile(void) {
   int empties = empty_count();
-  if (empties == 0) return;
+  if (empties == 0) return -1;
   int target = rand() % empties;
   uint8_t value = ((rand() % 10) == 0) ? 2 : 1;
   int k = 0;
   for (int i = 0; i < CELLS; i++) {
     if (game_board[i] == 0) {
-      if (k == target) { game_board[i] = value; return; }
+      if (k == target) { game_board[i] = value; return i; }
       k++;
     }
   }
+  return -1;
 }
 
 // Slide `row` to the left, merging equal adjacent tiles. Returns true if the
@@ -234,10 +236,11 @@ void game_apply_move(bool (*move_fn)(MoveAnim *)) {
     anim.dest[i] = -1;
     anim.merged[i] = false;
   }
+  anim.spawn_idx = -1;
 
   bool changed = move_fn(&anim);
   if (changed) {
-    spawn_tile();
+    anim.spawn_idx = spawn_tile();
     if (game_score > game_high_score) {
       game_high_score = game_score;
       persist_write_int(PERSIST_KEY_HIGH_SCORE, (int32_t)game_high_score);

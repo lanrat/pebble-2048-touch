@@ -25,6 +25,7 @@ typedef struct {
   int8_t  dest[CELLS];        // dest cell for the tile that started here;
                               //   -1 if the source cell was empty
   bool    merged[CELLS];      // true if this source tile merged at dest
+  int8_t  spawn_idx;          // cell index of the newly spawned tile, or -1
 } MoveAnim;
 
 // Move primitives. Each mutates game_board in place, fills `anim` with motion

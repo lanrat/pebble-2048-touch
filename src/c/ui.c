@@ -42,8 +42,12 @@ static bool s_pop_cells[CELLS];
 static int  s_pop_count;
 static AnimationProgress s_pop_progress;
 static bool s_pop_active;
+// Cell index of the newly spawned tile this move, or -1. While the post-slide
+// animation runs, the spawn cell is drawn growing from a 0-size point to its
+// full size (the rest of the board is drawn from game_board normally).
+static int8_t s_spawn_idx = -1;
 
-static void start_pop_animation(void);
+static void start_post_slide_animation(void);
 
 // Tile background color, indexed by log2 value. The palette ramps from pale
 // yellow through orange/red into greens/blues at the high end so the player
@@ -120,16 +124,18 @@ static GFont font_for_cell(int cell) {
 
 // Draw a single tile, inflating the cell rect by `inflate` pixels on each
 // side. inflate=0 means a normal-sized tile; positive values are used by the
-// merge-pop animation. value is the log2 of the tile value (0 means empty —
-// only the bg gets drawn). Pulled out of the rendering loops so static and
-// animated draws share one path.
+// merge-pop animation, negative by the spawn fade-in. value is the log2 of
+// the tile value (0 means empty — only the bg gets drawn). Set `draw_text`
+// false to suppress the number (used during the spawn fade until the box has
+// grown enough to fit the number, since Pebble's fonts don't scale).
 static void draw_tile_at(GContext *ctx, const GridGeom *g, GFont font,
-                         int x, int y, uint8_t value, int inflate) {
+                         int x, int y, uint8_t value, int inflate,
+                         bool draw_text) {
   GRect rect = GRect(x - inflate, y - inflate,
                      g->cell + 2 * inflate, g->cell + 2 * inflate);
   graphics_context_set_fill_color(ctx, tile_bg_color(value));
   graphics_fill_rect(ctx, rect, 3, GCornersAll);
-  if (value > 0) {
+  if (value > 0 && draw_text) {
     char buf[12];  // enough for "65536" plus NUL
     snprintf(buf, sizeof(buf), "%u", (unsigned)(1u << value));
     graphics_context_set_text_color(ctx, tile_text_color(value));
@@ -143,6 +149,11 @@ static void draw_tile_at(GContext *ctx, const GridGeom *g, GFont font,
   }
 }
 
+// During the spawn fade, hold back the number until the box has grown to
+// ~70% of full size. Pebble fonts don't scale, so drawing the number in a
+// tiny box yields awkward partial glyphs; holding off looks like a clean pop.
+#define SPAWN_TEXT_THRESHOLD ((AnimationProgress)(ANIMATION_NORMALIZED_MAX * 7 / 10))
+
 // Triangular envelope: 0 at progress 0 and progress MAX, peak at progress
 // MAX/2. Used to compute the per-frame inflate for merge pop.
 static int pop_inflate_pixels(void) {
@@ -151,6 +162,14 @@ static int pop_inflate_pixels(void) {
       ? s_pop_progress
       : (ANIMATION_NORMALIZED_MAX - s_pop_progress);
   return (int)(((int32_t)POP_PIXELS * 2 * halfway) / ANIMATION_NORMALIZED_MAX);
+}
+
+// Spawn fade-in: tile grows from 0 px to full cell size over the animation.
+// inflate=-cell/2 yields a 0-size rect; inflate=0 yields full size.
+static int spawn_inflate_pixels(int cell) {
+  if (!s_pop_active || s_spawn_idx < 0) return 0;
+  int32_t complement = ANIMATION_NORMALIZED_MAX - s_pop_progress;
+  return -(int)(((int32_t)cell * complement) / (2 * ANIMATION_NORMALIZED_MAX));
 }
 
 // Layer update_proc: draws the board. Called by the framework on dirty marks.
@@ -176,7 +195,7 @@ static void board_update_proc(Layer *layer, GContext *ctx) {
     for (int r = 0; r < GRID_N; r++) {
       for (int c = 0; c < GRID_N; c++) {
         GPoint p = cell_origin(&g, r, c);
-        draw_tile_at(ctx, &g, font, p.x, p.y, 0, 0);
+        draw_tile_at(ctx, &g, font, p.x, p.y, 0, 0, true);
       }
     }
     // Then draw each source tile from prev_value at its interpolated
@@ -194,19 +213,45 @@ static void board_update_proc(Layer *layer, GContext *ctx) {
       GPoint b = cell_origin(&g, to_r,   to_c);
       int x = lerp_i(a.x, b.x, s_slide_progress);
       int y = lerp_i(a.y, b.y, s_slide_progress);
-      draw_tile_at(ctx, &g, font, x, y, v, 0);
+      draw_tile_at(ctx, &g, font, x, y, v, 0, true);
     }
     return;
   }
 
-  // Idle or popping: render game_board, optionally inflating merged cells.
-  int inflate = pop_inflate_pixels();
+  // Idle or post-slide: render game_board. During post-slide, pop cells get
+  // a triangular inflate and the spawn cell grows from zero. These are
+  // mutually exclusive — spawn lands in an empty cell, merges land in
+  // occupied destinations.
+  int pop_inflate = pop_inflate_pixels();
+  int spawn_inflate = spawn_inflate_pixels(g.cell);
+  bool spawn_show_text = !s_pop_active || s_pop_progress >= SPAWN_TEXT_THRESHOLD;
   for (int r = 0; r < GRID_N; r++) {
     for (int c = 0; c < GRID_N; c++) {
       int idx = r * GRID_N + c;
       GPoint p = cell_origin(&g, r, c);
-      int this_inflate = (s_pop_active && s_pop_cells[idx]) ? inflate : 0;
-      draw_tile_at(ctx, &g, font, p.x, p.y, game_board[idx], this_inflate);
+      int this_inflate = 0;
+      bool is_spawn = (s_pop_active && idx == s_spawn_idx);
+      if (s_pop_active) {
+        if (s_pop_cells[idx])        this_inflate = pop_inflate;
+        else if (idx == s_spawn_idx) this_inflate = spawn_inflate;
+      }
+      // If the spawn rect is collapsed (size <= 0), only draw the empty-cell
+      // background — drawing the colored tile would emit a stray fill at the
+      // cell's center pixel.
+      if (is_spawn && (g.cell + 2 * spawn_inflate) <= 0) {
+        draw_tile_at(ctx, &g, font, p.x, p.y, 0, 0, true);
+        continue;
+      }
+      // For the spawn cell, draw empty bg first so the growing tile appears
+      // "on top" of an empty slot rather than over an instantly-full one.
+      if (is_spawn) {
+        draw_tile_at(ctx, &g, font, p.x, p.y, 0, 0, true);
+      }
+      // Suppress the number on the spawn cell until the box is roughly full
+      // size — Pebble fonts don't scale, so partial glyphs look bad.
+      bool draw_text = is_spawn ? spawn_show_text : true;
+      draw_tile_at(ctx, &g, font, p.x, p.y, game_board[idx],
+                   this_inflate, draw_text);
     }
   }
 }
@@ -236,9 +281,12 @@ static void slide_stopped(Animation *anim, bool finished, void *ctx) {
   // Pebble docs: after .stopped fires the Animation must be destroyed.
   if (s_slide_handle == anim) s_slide_handle = NULL;
   animation_destroy(anim);
-  // Chain into the pop only if the slide ran to completion AND any merges
-  // occurred. Cancelled slides skip the pop.
-  if (finished && s_pop_count > 0) start_pop_animation();
+  // Chain into the post-slide phase only if the slide ran to completion AND
+  // something interesting happens there (merge pop or spawn fade). Cancelled
+  // slides skip the post phase — the caller is about to start a new slide.
+  if (finished && (s_pop_count > 0 || s_spawn_idx >= 0)) {
+    start_post_slide_animation();
+  }
 }
 
 // --- Pop animation plumbing ---
@@ -253,6 +301,7 @@ static void pop_teardown(Animation *anim) {
   s_pop_progress = 0;
   s_pop_count = 0;
   for (int i = 0; i < CELLS; i++) s_pop_cells[i] = false;
+  s_spawn_idx = -1;
   layer_mark_dirty(s_board_layer);
 }
 
@@ -266,7 +315,9 @@ static void pop_stopped(Animation *anim, bool finished, void *ctx) {
   animation_destroy(anim);
 }
 
-static void start_pop_animation(void) {
+// Drives both the merge pop envelope and the spawn fade-in growth. Both
+// effects use s_pop_progress as their time base.
+static void start_post_slide_animation(void) {
   s_pop_progress = 0;
   s_pop_active = true;
 
@@ -304,6 +355,7 @@ void ui_animate_move(const MoveAnim *anim) {
       }
     }
   }
+  s_spawn_idx = s_active_anim.spawn_idx;
 
   Animation *a = animation_create();
   animation_set_duration(a, SLIDE_MS);
