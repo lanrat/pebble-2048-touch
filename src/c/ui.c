@@ -11,20 +11,39 @@ static TextLayer *s_status_layer;  // "Game over" / "You win!" / "2048!" banner
 // this buffer must outlive every set_text call.
 static char s_score_buf[40];
 
-// --- Slide animation state ---
+// --- Move animations ---
 //
-// While s_animating is true, board_update_proc renders tiles from
-// s_active_anim at interpolated positions instead of drawing from game_board.
-// Any newly spawned tile (placed in game_board by game_apply_move) is hidden
-// until the animation completes — it isn't in s_active_anim.prev_value, so
-// the animation pass simply doesn't draw it. The final redraw on teardown
-// switches back to drawing game_board, revealing the spawn.
-#define ANIM_DURATION_MS 120
+// A move plays in two phases:
+//
+//  1. SLIDE (120 ms): tiles are rendered from s_active_anim.prev_value at
+//     positions linearly interpolated between their source and destination
+//     cells. game_board is hidden in this phase so the merged values and the
+//     newly spawned tile don't pop in early.
+//  2. POP (150 ms, only if any merges happened): renders game_board normally
+//     except that the merged-destination cells are drawn with their rect
+//     inflated by a triangular envelope (grow then shrink) to highlight the
+//     merge. The newly spawned tile is now visible.
+//
+// If a fresh move arrives during either phase, the current animation is
+// cancelled and a new slide starts immediately from the current game_board
+// (the prior move's mutations have already been committed by game.c).
+#define SLIDE_MS 120
+#define POP_MS   150
+#define POP_PIXELS 5  // peak inflate per side for merged tiles
 
-static Animation *s_anim_handle;
+static Animation *s_slide_handle;
+static Animation *s_pop_handle;
 static MoveAnim   s_active_anim;
-static AnimationProgress s_progress;
-static bool s_animating;
+static AnimationProgress s_slide_progress;
+static bool s_slide_active;
+// Cells (post-move) that should pop after the slide. Mirrors merged sources
+// in s_active_anim, deduplicated to one flag per destination cell.
+static bool s_pop_cells[CELLS];
+static int  s_pop_count;
+static AnimationProgress s_pop_progress;
+static bool s_pop_active;
+
+static void start_pop_animation(void);
 
 // Tile background color, indexed by log2 value. The palette ramps from pale
 // yellow through orange/red into greens/blues at the high end so the player
@@ -99,33 +118,49 @@ static GFont font_for_cell(int cell) {
   return fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
 }
 
-// Draw a single tile at the given top-left pixel. value is the log2 of the
-// tile value (0 means empty cell — only the bg gets drawn). Pulled out of the
-// rendering loops so static and animated draws share one path.
-static void draw_tile(GContext *ctx, const GridGeom *g, GFont font,
-                      int x, int y, uint8_t value) {
+// Draw a single tile, inflating the cell rect by `inflate` pixels on each
+// side. inflate=0 means a normal-sized tile; positive values are used by the
+// merge-pop animation. value is the log2 of the tile value (0 means empty —
+// only the bg gets drawn). Pulled out of the rendering loops so static and
+// animated draws share one path.
+static void draw_tile_at(GContext *ctx, const GridGeom *g, GFont font,
+                         int x, int y, uint8_t value, int inflate) {
+  GRect rect = GRect(x - inflate, y - inflate,
+                     g->cell + 2 * inflate, g->cell + 2 * inflate);
   graphics_context_set_fill_color(ctx, tile_bg_color(value));
-  graphics_fill_rect(ctx, GRect(x, y, g->cell, g->cell), 3, GCornersAll);
+  graphics_fill_rect(ctx, rect, 3, GCornersAll);
   if (value > 0) {
     char buf[12];  // enough for "65536" plus NUL
     snprintf(buf, sizeof(buf), "%u", (unsigned)(1u << value));
     graphics_context_set_text_color(ctx, tile_text_color(value));
     // Nudge text down a bit on larger cells so it looks vertically centered —
     // system fonts have noticeable top padding.
-    GRect tr = GRect(x, y + (g->cell > 32 ? 4 : 0), g->cell, g->cell);
+    GRect tr = GRect(rect.origin.x,
+                     rect.origin.y + (g->cell > 32 ? 4 : 0),
+                     rect.size.w, rect.size.h);
     graphics_draw_text(ctx, buf, font, tr, GTextOverflowModeFill,
                        GTextAlignmentCenter, NULL);
   }
 }
 
+// Triangular envelope: 0 at progress 0 and progress MAX, peak at progress
+// MAX/2. Used to compute the per-frame inflate for merge pop.
+static int pop_inflate_pixels(void) {
+  if (!s_pop_active) return 0;
+  AnimationProgress halfway = s_pop_progress < (ANIMATION_NORMALIZED_MAX / 2)
+      ? s_pop_progress
+      : (ANIMATION_NORMALIZED_MAX - s_pop_progress);
+  return (int)(((int32_t)POP_PIXELS * 2 * halfway) / ANIMATION_NORMALIZED_MAX);
+}
+
 // Layer update_proc: draws the board. Called by the framework on dirty marks.
 //
-// Two modes:
+// Three modes (mutually exclusive):
 //  - Idle: iterate game_board, draw each cell at its grid position.
-//  - Animating: iterate the snapshotted prev_value, draw each non-empty source
-//    cell at the interpolated position between its src and dest. The
-//    background grid (gray rounded square) and empty-cell placeholders are
-//    drawn first so the moving tiles appear "on top" of the static grid.
+//  - Sliding: iterate s_active_anim.prev_value, draw each source tile at the
+//    interpolated position between its src and dest cells.
+//  - Popping: iterate game_board normally, but for merged-destination cells,
+//    inflate the tile rect by a time-varying amount (peak in the middle).
 static void board_update_proc(Layer *layer, GContext *ctx) {
   GridGeom g = compute_geom(layer_get_bounds(layer));
   GFont font = font_for_cell(g.cell);
@@ -135,88 +170,147 @@ static void board_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, GRect(g.ox, g.oy, grid_side, grid_side),
                      4, GCornersAll);
 
-  if (!s_animating) {
-    // Idle mode: straight game_board render.
+  if (s_slide_active) {
+    // Slide phase: draw empty-cell backgrounds for every slot first so the
+    // dark grid doesn't show through gaps between moving tiles.
     for (int r = 0; r < GRID_N; r++) {
       for (int c = 0; c < GRID_N; c++) {
         GPoint p = cell_origin(&g, r, c);
-        draw_tile(ctx, &g, font, p.x, p.y, game_board[r * GRID_N + c]);
+        draw_tile_at(ctx, &g, font, p.x, p.y, 0, 0);
       }
+    }
+    // Then draw each source tile from prev_value at its interpolated
+    // position. We deliberately don't draw game_board contents here — the
+    // just-spawned tile and post-merge values stay hidden until the slide
+    // completes.
+    for (int i = 0; i < CELLS; i++) {
+      uint8_t v = s_active_anim.prev_value[i];
+      if (v == 0) continue;
+      int8_t dst = s_active_anim.dest[i];
+      int from_r = i / GRID_N, from_c = i % GRID_N;
+      int to_r = (dst < 0) ? from_r : (dst / GRID_N);
+      int to_c = (dst < 0) ? from_c : (dst % GRID_N);
+      GPoint a = cell_origin(&g, from_r, from_c);
+      GPoint b = cell_origin(&g, to_r,   to_c);
+      int x = lerp_i(a.x, b.x, s_slide_progress);
+      int y = lerp_i(a.y, b.y, s_slide_progress);
+      draw_tile_at(ctx, &g, font, x, y, v, 0);
     }
     return;
   }
 
-  // Animating mode. First draw empty-cell backgrounds for every slot so the
-  // grid doesn't show through gaps between moving tiles.
+  // Idle or popping: render game_board, optionally inflating merged cells.
+  int inflate = pop_inflate_pixels();
   for (int r = 0; r < GRID_N; r++) {
     for (int c = 0; c < GRID_N; c++) {
+      int idx = r * GRID_N + c;
       GPoint p = cell_origin(&g, r, c);
-      draw_tile(ctx, &g, font, p.x, p.y, 0);
+      int this_inflate = (s_pop_active && s_pop_cells[idx]) ? inflate : 0;
+      draw_tile_at(ctx, &g, font, p.x, p.y, game_board[idx], this_inflate);
     }
-  }
-  // Then draw each source tile from prev_value at its interpolated position.
-  // We deliberately don't draw game_board contents here — the just-spawned
-  // tile and post-merge values stay hidden until the animation completes.
-  for (int i = 0; i < CELLS; i++) {
-    uint8_t v = s_active_anim.prev_value[i];
-    if (v == 0) continue;
-    int8_t dst = s_active_anim.dest[i];
-    int from_r = i / GRID_N, from_c = i % GRID_N;
-    int to_r = (dst < 0) ? from_r : (dst / GRID_N);
-    int to_c = (dst < 0) ? from_c : (dst % GRID_N);
-    GPoint a = cell_origin(&g, from_r, from_c);
-    GPoint b = cell_origin(&g, to_r,   to_c);
-    int x = lerp_i(a.x, b.x, s_progress);
-    int y = lerp_i(a.y, b.y, s_progress);
-    draw_tile(ctx, &g, font, x, y, v);
   }
 }
 
 // --- Slide animation plumbing ---
 
-static void anim_update(Animation *anim, const AnimationProgress p) {
-  s_progress = p;
+static void slide_update(Animation *anim, const AnimationProgress p) {
+  s_slide_progress = p;
   layer_mark_dirty(s_board_layer);
 }
 
-static void anim_teardown(Animation *anim) {
-  s_animating = false;
-  s_progress = 0;
-  layer_mark_dirty(s_board_layer);  // final pass renders game_board normally
+static void slide_teardown(Animation *anim) {
+  s_slide_active = false;
+  s_slide_progress = 0;
+  // Don't kick off the pop here — teardown can run during unschedule (when a
+  // new move arrived mid-slide), and we don't want to pop the cancelled
+  // slide's merges. .stopped handler decides based on `finished`.
+  layer_mark_dirty(s_board_layer);
 }
 
-static const AnimationImplementation s_anim_impl = {
-  .update = anim_update,
-  .teardown = anim_teardown,
+static const AnimationImplementation s_slide_impl = {
+  .update = slide_update,
+  .teardown = slide_teardown,
 };
 
-static void anim_stopped(Animation *anim, bool finished, void *ctx) {
-  // Pebble docs: after .stopped fires the Animation must be destroyed. We
-  // also clear our handle so a follow-up move can schedule a fresh one.
-  if (s_anim_handle == anim) s_anim_handle = NULL;
+static void slide_stopped(Animation *anim, bool finished, void *ctx) {
+  // Pebble docs: after .stopped fires the Animation must be destroyed.
+  if (s_slide_handle == anim) s_slide_handle = NULL;
+  animation_destroy(anim);
+  // Chain into the pop only if the slide ran to completion AND any merges
+  // occurred. Cancelled slides skip the pop.
+  if (finished && s_pop_count > 0) start_pop_animation();
+}
+
+// --- Pop animation plumbing ---
+
+static void pop_update(Animation *anim, const AnimationProgress p) {
+  s_pop_progress = p;
+  layer_mark_dirty(s_board_layer);
+}
+
+static void pop_teardown(Animation *anim) {
+  s_pop_active = false;
+  s_pop_progress = 0;
+  s_pop_count = 0;
+  for (int i = 0; i < CELLS; i++) s_pop_cells[i] = false;
+  layer_mark_dirty(s_board_layer);
+}
+
+static const AnimationImplementation s_pop_impl = {
+  .update = pop_update,
+  .teardown = pop_teardown,
+};
+
+static void pop_stopped(Animation *anim, bool finished, void *ctx) {
+  if (s_pop_handle == anim) s_pop_handle = NULL;
   animation_destroy(anim);
 }
 
-void ui_animate_move(const MoveAnim *anim) {
-  // If a previous slide is still in flight, cancel it. unschedule fires
-  // teardown (which sets s_animating=false and marks the layer dirty); the
-  // .stopped handler then destroys it. We immediately overwrite the state
-  // below with the new animation.
-  if (s_anim_handle) {
-    animation_unschedule(s_anim_handle);
-    s_anim_handle = NULL;
-  }
-
-  s_active_anim = *anim;  // copy: caller's struct lives on the stack
-  s_progress = 0;
-  s_animating = true;
+static void start_pop_animation(void) {
+  s_pop_progress = 0;
+  s_pop_active = true;
 
   Animation *a = animation_create();
-  animation_set_duration(a, ANIM_DURATION_MS);
+  animation_set_duration(a, POP_MS);
+  animation_set_curve(a, AnimationCurveLinear);  // envelope is in pop_inflate
+  animation_set_implementation(a, &s_pop_impl);
+  animation_set_handlers(a, (AnimationHandlers){ .stopped = pop_stopped }, NULL);
+  s_pop_handle = a;
+  animation_schedule(a);
+}
+
+void ui_animate_move(const MoveAnim *anim) {
+  // Cancel any in-flight slide or pop. unschedule fires teardown (which
+  // clears flags and marks the layer dirty); the .stopped handler then
+  // destroys it. The .stopped's `finished=false` ensures the cancelled
+  // slide doesn't chain into a pop.
+  if (s_slide_handle) { animation_unschedule(s_slide_handle); s_slide_handle = NULL; }
+  if (s_pop_handle)   { animation_unschedule(s_pop_handle);   s_pop_handle = NULL; }
+
+  s_active_anim = *anim;  // copy: caller's struct lives on the stack
+  s_slide_progress = 0;
+  s_slide_active = true;
+
+  // Pre-compute which destination cells need to pop after the slide.
+  // Multiple sources can merge into one destination — dedup with the bool.
+  for (int i = 0; i < CELLS; i++) s_pop_cells[i] = false;
+  s_pop_count = 0;
+  for (int i = 0; i < CELLS; i++) {
+    if (s_active_anim.merged[i] && s_active_anim.dest[i] >= 0) {
+      int d = s_active_anim.dest[i];
+      if (!s_pop_cells[d]) {
+        s_pop_cells[d] = true;
+        s_pop_count++;
+      }
+    }
+  }
+
+  Animation *a = animation_create();
+  animation_set_duration(a, SLIDE_MS);
   animation_set_curve(a, AnimationCurveEaseInOut);
-  animation_set_implementation(a, &s_anim_impl);
-  animation_set_handlers(a, (AnimationHandlers){ .stopped = anim_stopped }, NULL);
-  s_anim_handle = a;
+  animation_set_implementation(a, &s_slide_impl);
+  animation_set_handlers(a, (AnimationHandlers){ .stopped = slide_stopped }, NULL);
+  s_slide_handle = a;
   animation_schedule(a);
 }
 
@@ -277,10 +371,8 @@ void ui_window_load(Window *window) {
 }
 
 void ui_window_unload(Window *window) {
-  if (s_anim_handle) {
-    animation_unschedule(s_anim_handle);
-    s_anim_handle = NULL;
-  }
+  if (s_slide_handle) { animation_unschedule(s_slide_handle); s_slide_handle = NULL; }
+  if (s_pop_handle)   { animation_unschedule(s_pop_handle);   s_pop_handle = NULL; }
   text_layer_destroy(s_score_layer);
   text_layer_destroy(s_status_layer);
   layer_destroy(s_board_layer);
