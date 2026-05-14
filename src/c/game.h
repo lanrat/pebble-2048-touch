@@ -17,16 +17,27 @@ extern uint32_t game_high_score;
 extern bool game_is_over;
 extern bool game_is_won;  // sticky: stays true once 2048 has been reached
 
-// Move primitives. Each mutates game_board in place and returns true if the
-// board changed (i.e. the move was "legal" and produced motion or merges).
-bool game_move_left(void);
-bool game_move_right(void);
-bool game_move_up(void);
-bool game_move_down(void);
+// Per-tile motion info used to drive slide animations. Populated by each move
+// function; consumed by ui_animate_move(). All indices are flat cell indices
+// (row * GRID_N + col).
+typedef struct {
+  uint8_t prev_value[CELLS];  // board value at each cell BEFORE the move
+  int8_t  dest[CELLS];        // dest cell for the tile that started here;
+                              //   -1 if the source cell was empty
+  bool    merged[CELLS];      // true if this source tile merged at dest
+} MoveAnim;
+
+// Move primitives. Each mutates game_board in place, fills `anim` with motion
+// info, and returns true if the board changed (i.e. the move was "legal").
+bool game_move_left(MoveAnim *anim);
+bool game_move_right(MoveAnim *anim);
+bool game_move_up(MoveAnim *anim);
+bool game_move_down(MoveAnim *anim);
 
 // Apply a move and handle all post-move bookkeeping: spawn a tile, update
-// score/high score, persist, trigger UI redraws, and detect game-over / 2048.
-void game_apply_move(bool (*move_fn)(void));
+// score/high score, persist, kick off the slide animation, and detect
+// game-over / 2048.
+void game_apply_move(bool (*move_fn)(MoveAnim *));
 
 // Start a fresh game (clears saved state). Triggers UI updates.
 void game_reset(void);

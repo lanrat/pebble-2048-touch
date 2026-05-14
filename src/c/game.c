@@ -38,19 +38,19 @@ static void spawn_tile(void) {
 }
 
 // Slide `row` to the left, merging equal adjacent tiles. Returns true if the
-// row changed. This is the single primitive — other move directions reuse it
-// via row/column rotation (see game_move_right, _up, _down).
+// row changed. Also reports per-source-position motion: `dest[i]` is the
+// destination position in this row for the tile that started at position i
+// (-1 if cell was empty), and `merged[i]` is true if that tile merged into
+// another at the destination.
 //
-// merged_slot[] enforces the 2048 rule that a freshly-merged tile cannot merge
-// again in the same move: e.g. [2,2,4,_] -> [4,4,_,_], NOT [8,_,_,_]. The slot
-// becomes eligible again on the next move.
-//
-// Score increases by the resulting tile value (1u << new_log2). Reaching 2048
-// flips the sticky game_is_won flag.
-static bool compact_row_left(uint8_t *row) {
+// merged_slot[] enforces the 2048 rule that a freshly-merged tile cannot
+// merge again in the same move: [2,2,4,_] -> [4,4,_,_], not [8,_,_,_].
+static bool compact_row_left(uint8_t *row, int8_t *dest, bool *merged) {
   uint8_t out[GRID_N] = {0, 0, 0, 0};
   int w = 0;
   bool merged_slot[GRID_N] = {false, false, false, false};
+  for (int i = 0; i < GRID_N; i++) { dest[i] = -1; merged[i] = false; }
+
   for (int i = 0; i < GRID_N; i++) {
     if (row[i] == 0) continue;
     if (w > 0 && out[w - 1] == row[i] && !merged_slot[w - 1]) {
@@ -58,10 +58,14 @@ static bool compact_row_left(uint8_t *row) {
       merged_slot[w - 1] = true;
       game_score += (1UL << out[w - 1]);
       if (out[w - 1] == 11) game_is_won = true;  // 2^11 == 2048
+      dest[i] = w - 1;
+      merged[i] = true;
     } else {
       out[w++] = row[i];
+      dest[i] = w - 1;
     }
   }
+
   bool changed = false;
   for (int i = 0; i < GRID_N; i++) {
     if (row[i] != out[i]) changed = true;
@@ -93,45 +97,98 @@ static void reverse4(uint8_t *a) {
   t = a[1]; a[1] = a[2]; a[2] = t;
 }
 
-bool game_move_left(void) {
+bool game_move_left(MoveAnim *anim) {
   bool changed = false;
-  uint8_t row[GRID_N];
   for (int r = 0; r < GRID_N; r++) {
+    uint8_t row[GRID_N];
+    int8_t row_dest[GRID_N];
+    bool row_merged[GRID_N];
     get_row(r, row);
-    if (compact_row_left(row)) { put_row(r, row); changed = true; }
+    if (compact_row_left(row, row_dest, row_merged)) {
+      put_row(r, row);
+      changed = true;
+    }
+    for (int i = 0; i < GRID_N; i++) {
+      int src = r * GRID_N + i;
+      anim->dest[src] = (row_dest[i] < 0) ? -1 : (r * GRID_N + row_dest[i]);
+      anim->merged[src] = row_merged[i];
+    }
   }
   return changed;
 }
-bool game_move_right(void) {
+
+bool game_move_right(MoveAnim *anim) {
   bool changed = false;
-  uint8_t row[GRID_N];
   for (int r = 0; r < GRID_N; r++) {
+    uint8_t row[GRID_N];
+    int8_t row_dest[GRID_N];
+    bool row_merged[GRID_N];
     get_row(r, row);
     reverse4(row);
-    bool c = compact_row_left(row);
+    bool c = compact_row_left(row, row_dest, row_merged);
     reverse4(row);
-    if (c) { put_row(r, row); changed = true; }
+    if (c) {
+      put_row(r, row);
+      changed = true;
+    }
+    // Map original col i -> reversed col (3-i) -> dest in reversed coords
+    // -> back to original col (3 - row_dest[3-i]).
+    for (int i = 0; i < GRID_N; i++) {
+      int rev_i = (GRID_N - 1) - i;
+      int8_t rev_dest = row_dest[rev_i];
+      int src = r * GRID_N + i;
+      anim->dest[src] = (rev_dest < 0)
+        ? -1
+        : (r * GRID_N + ((GRID_N - 1) - rev_dest));
+      anim->merged[src] = row_merged[rev_i];
+    }
   }
   return changed;
 }
-bool game_move_up(void) {
+
+bool game_move_up(MoveAnim *anim) {
   bool changed = false;
-  uint8_t col[GRID_N];
   for (int c = 0; c < GRID_N; c++) {
+    uint8_t col[GRID_N];
+    int8_t col_dest[GRID_N];
+    bool col_merged[GRID_N];
     get_col(c, col);
-    if (compact_row_left(col)) { put_col(c, col); changed = true; }
+    if (compact_row_left(col, col_dest, col_merged)) {
+      put_col(c, col);
+      changed = true;
+    }
+    for (int i = 0; i < GRID_N; i++) {
+      int src = i * GRID_N + c;
+      anim->dest[src] = (col_dest[i] < 0) ? -1 : (col_dest[i] * GRID_N + c);
+      anim->merged[src] = col_merged[i];
+    }
   }
   return changed;
 }
-bool game_move_down(void) {
+
+bool game_move_down(MoveAnim *anim) {
   bool changed = false;
-  uint8_t col[GRID_N];
   for (int c = 0; c < GRID_N; c++) {
+    uint8_t col[GRID_N];
+    int8_t col_dest[GRID_N];
+    bool col_merged[GRID_N];
     get_col(c, col);
     reverse4(col);
-    bool ch = compact_row_left(col);
+    bool ch = compact_row_left(col, col_dest, col_merged);
     reverse4(col);
-    if (ch) { put_col(c, col); changed = true; }
+    if (ch) {
+      put_col(c, col);
+      changed = true;
+    }
+    for (int i = 0; i < GRID_N; i++) {
+      int rev_i = (GRID_N - 1) - i;
+      int8_t rev_dest = col_dest[rev_i];
+      int src = i * GRID_N + c;
+      anim->dest[src] = (rev_dest < 0)
+        ? -1
+        : (((GRID_N - 1) - rev_dest) * GRID_N + c);
+      anim->merged[src] = col_merged[rev_i];
+    }
   }
   return changed;
 }
@@ -165,10 +222,20 @@ static void clear_saved_state(void) {
   persist_delete(PERSIST_KEY_WON);
 }
 
-void game_apply_move(bool (*move_fn)(void)) {
+void game_apply_move(bool (*move_fn)(MoveAnim *)) {
   if (game_is_over) return;
   bool was_won = game_is_won;  // rising edge for the "2048!" banner
-  bool changed = move_fn();
+
+  // Capture pre-move state for the animation. We snapshot prev_value before
+  // move_fn mutates game_board; dest/merged are populated by move_fn.
+  MoveAnim anim;
+  for (int i = 0; i < CELLS; i++) {
+    anim.prev_value[i] = game_board[i];
+    anim.dest[i] = -1;
+    anim.merged[i] = false;
+  }
+
+  bool changed = move_fn(&anim);
   if (changed) {
     spawn_tile();
     if (game_score > game_high_score) {
@@ -176,7 +243,7 @@ void game_apply_move(bool (*move_fn)(void)) {
       persist_write_int(PERSIST_KEY_HIGH_SCORE, (int32_t)game_high_score);
     }
     ui_update_score();
-    ui_mark_board_dirty();
+    ui_animate_move(&anim);  // schedules the slide; redraw happens on completion
     save_state();
   }
   if (!any_moves_available()) {
