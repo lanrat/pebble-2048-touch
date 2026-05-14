@@ -1,0 +1,54 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: auto
+
+      - name: Install Pebble SDK
+        run: |
+          uv tool install pebble-tool
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install Pebble SDK dependencies
+        run: |
+          pebble sdk install latest
+
+      - name: Build
+        run: pebble build
+
+      - name: Upload PBW to Action
+        uses: actions/upload-artifact@v7
+        with:
+          name: 2048 Touch
+          path: ${{ github.workspace }}/build/*.pbw
+
+      - name: Rename PBW with version
+        if: github.ref_type == 'tag'
+        run: |
+          for f in "${{ github.workspace }}"/build/*.pbw; do
+            mv "$f" "${f%.pbw}-${{ github.ref_name }}.pbw"
+          done
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ github.workspace }}/build/*.pbw
