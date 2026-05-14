@@ -1,5 +1,7 @@
 # 2048 for Pebble
 
+![2048 for Pebble](store_screenshots/banner.jpeg)
+
 The 2048 sliding-tile game for Pebble smartwatches. Supports touch swipes on
 touch-capable models (emery) and physical buttons on the rest.
 
@@ -7,6 +9,12 @@ Install from the app stores:
 
 - Core Devices: <https://apps.repebble.com/6df87b64b7174448a065ef54>
 - Rebble: <https://apps.rebble.io/en_US/application/6a0567d11cbe56000ae6c9a8>
+
+## Screenshots
+
+| Pebble Time 2 (emery) | Pebble Time Round (chalk) | Pebble 2 (diorite) |
+| :---: | :---: | :---: |
+| ![emery](store_screenshots/02_emery_higher.png) | ![chalk](store_screenshots/05_chalk.png) | ![diorite](store_screenshots/08_diorite.png) |
 
 ## Store description
 
