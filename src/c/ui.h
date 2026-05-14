@@ -13,10 +13,6 @@ void ui_window_unload(Window *window);
 void ui_update_score(void);
 void ui_mark_board_dirty(void);
 
-// Cancel any in-flight slide / pop animations. Used by game_undo_to_snapshot
-// so a reverted move doesn't leave a trailing animation playing.
-void ui_cancel_animations(void);
-
 // Kick off a slide animation for the given move. Tiles in `anim->prev_value`
 // slide from their source cells to `anim->dest[src]`. ~100ms; the board is
 // redrawn from game_board after the animation completes (so a newly spawned

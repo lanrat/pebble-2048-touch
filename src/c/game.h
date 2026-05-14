@@ -40,16 +40,6 @@ bool game_move_down(MoveAnim *anim);
 // game-over / 2048.
 void game_apply_move(bool (*move_fn)(MoveAnim *));
 
-// Snapshot the current game state for a possible undo. Cleared each call.
-// Used by input.c to revert the move applied on a button's single_click
-// press if the same button ends up firing long_click. Without this, a long
-// press would visibly run the short action first.
-void game_snapshot(void);
-
-// Restore the snapshotted state, cancel any in-flight slide/pop animations,
-// and redraw. No-op if there's no current snapshot.
-void game_undo_to_snapshot(void);
-
 // Start a fresh game (clears saved state). Triggers UI updates.
 void game_reset(void);
 

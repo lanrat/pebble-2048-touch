@@ -373,23 +373,6 @@ void ui_animate_move(const MoveAnim *anim) {
   animation_schedule(a);
 }
 
-// Stop any active slide or pop animation. The animation's teardown clears
-// all its state and marks the layer dirty, so the next redraw renders
-// game_board cleanly. Used by game_undo_to_snapshot to revert mid-animation.
-void ui_cancel_animations(void) {
-  if (s_slide_handle) {
-    animation_unschedule(s_slide_handle);
-    s_slide_handle = NULL;
-  }
-  if (s_pop_handle) {
-    animation_unschedule(s_pop_handle);
-    s_pop_handle = NULL;
-  }
-  s_slide_active = false;
-  s_pop_active = false;
-  s_spawn_idx = -1;
-}
-
 void ui_update_score(void) {
   snprintf(s_score_buf, sizeof(s_score_buf), "%lu / %lu",
            (unsigned long)game_score, (unsigned long)game_high_score);

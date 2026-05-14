@@ -4,15 +4,18 @@
 // below. Each binding maps a physical button to a short-press action and an
 // optional long-press action.
 //
-// Click dispatch: single_click + (optionally) long_click per button. By
-// Pebble convention, when both are subscribed on the same button, single_click
-// only fires for presses below the long_click threshold; long_click fires
-// when the threshold is crossed and (in that case) single_click does not.
-// Some firmware versions still fire single_click on release after long_click
-// has fired, so each long handler also sets a per-button latch that the
-// short handler checks and clears. The latch is also cleared whenever the
-// user interacts with the reset overlay so a stale latch from a long-press
-// that opened it doesn't suppress later short presses.
+// Click dispatch:
+//  - UP / DOWN: single_click. Snappy on-press response. No long action.
+//  - SELECT: single_click + long_click. Pebble suppresses single_click on a
+//    long press, so short = right move, long = reset overlay.
+//  - BACK: multi_click only. The firmware intercepts a long BACK press at
+//    the system level and force-exits the app, completely bypassing app-side
+//    long_click subscriptions (verified via APP_LOG on real hardware).
+//    multi_click(count=1, last_only, timeout=50ms) fires ~50ms AFTER release.
+//    For a long press, the firmware force-exits while the user is still
+//    holding, so the release event never reaches multi_click and the short
+//    action (left move) isn't applied. For a short tap, release happens fast
+//    and the handler runs normally.
 #include "input.h"
 #include "game.h"
 #include "ui.h"
@@ -27,23 +30,26 @@ typedef enum {
   ACT_MOVE_LEFT,
   ACT_MOVE_RIGHT,
   ACT_SHOW_RESET_CONFIRM,
-  ACT_EXIT_APP,
 } ButtonAction;
 
 typedef struct {
   ButtonId      button;
   ButtonAction  short_action;
-  ButtonAction  long_action;  // ACT_NONE → no long press registered
+  ButtonAction  long_action;  // ACT_NONE → no long_click subscribed
 } ButtonBinding;
 
-// Single source of truth for button behavior. Order doesn't matter.
+// Single source of truth for button behavior. Order doesn't matter. BACK's
+// long-press exit is handled by the firmware at the system level — we don't
+// register a long_action for it.
 static const ButtonBinding s_bindings[] = {
   { BUTTON_ID_UP,     ACT_MOVE_UP,    ACT_NONE },
   { BUTTON_ID_DOWN,   ACT_MOVE_DOWN,  ACT_NONE },
   { BUTTON_ID_SELECT, ACT_MOVE_RIGHT, ACT_SHOW_RESET_CONFIRM },
-  { BUTTON_ID_BACK,   ACT_MOVE_LEFT,  ACT_EXIT_APP },
+  { BUTTON_ID_BACK,   ACT_MOVE_LEFT,  ACT_NONE },
 };
 #define NUM_BINDINGS (sizeof(s_bindings) / sizeof(s_bindings[0]))
+
+#define LONG_PRESS_MS 500
 
 static const ButtonBinding *find_binding(ButtonId b) {
   for (size_t i = 0; i < NUM_BINDINGS; i++) {
@@ -52,76 +58,36 @@ static const ButtonBinding *find_binding(ButtonId b) {
   return NULL;
 }
 
-// Dispatch a resolved ButtonAction. Returns true if the action consumed the
-// event (e.g., showed an overlay or exited). Returns false for game moves so
-// the caller can apply the standard "if game_over, reset instead" gating.
-static bool dispatch_action(ButtonAction action) {
+// Dispatch a resolved ButtonAction.
+static void dispatch_action(ButtonAction action) {
   switch (action) {
-    case ACT_NONE:                                            return true;
-    case ACT_MOVE_UP:    game_apply_move(game_move_up);       return false;
-    case ACT_MOVE_DOWN:  game_apply_move(game_move_down);     return false;
-    case ACT_MOVE_LEFT:  game_apply_move(game_move_left);     return false;
-    case ACT_MOVE_RIGHT: game_apply_move(game_move_right);    return false;
+    case ACT_NONE:                                          break;
+    case ACT_MOVE_UP:    game_apply_move(game_move_up);     break;
+    case ACT_MOVE_DOWN:  game_apply_move(game_move_down);   break;
+    case ACT_MOVE_LEFT:  game_apply_move(game_move_left);   break;
+    case ACT_MOVE_RIGHT: game_apply_move(game_move_right);  break;
     case ACT_SHOW_RESET_CONFIRM:
       if (!ui_reset_confirm_visible()) ui_show_reset_confirm();
-      return true;
-    case ACT_EXIT_APP:
-      // While the overlay is up, BACK-long dismisses it rather than exits.
-      if (ui_reset_confirm_visible()) {
-        ui_dismiss_reset_confirm();
-        return true;
-      }
-      window_stack_pop_all(true);
-      return true;
+      break;
   }
-  return false;
 }
-
-#define LONG_PRESS_MS 500
-
-// Per-button latch set by the long handler. The short handler checks and
-// clears it on entry. Cleared en masse whenever the user interacts with the
-// reset overlay (so a stale latch doesn't suppress later legitimate presses).
-static bool s_long_latch[NUM_BUTTONS];
-
-static void clear_all_latches(void) {
-  for (int i = 0; i < NUM_BUTTONS; i++) s_long_latch[i] = false;
-}
-
-// Belt-and-suspenders disambiguation:
-//  - LATCH catches firmware that fires single_click on release after
-//    long_click has already fired. Long sets, short clears and bails.
-//  - SNAPSHOT/UNDO catches firmware that fires single_click on press before
-//    long_click fires. Short takes a snapshot before applying its action;
-//    if long fires next, it restores the pre-move state.
-// Together they cover both observed firmware behaviors.
 
 static void short_handler(ClickRecognizerRef r, void *ctx) {
   ButtonId b = click_recognizer_get_button_id(r);
-  if (s_long_latch[b]) { s_long_latch[b] = false; return; }
-
+  // Any short press while the reset-confirm overlay is up either confirms
+  // (SELECT) or cancels (others).
   if (ui_reset_confirm_visible()) {
     ui_dismiss_reset_confirm();
-    clear_all_latches();
     if (b == BUTTON_ID_SELECT) game_reset();
     return;
   }
   if (game_is_over) { game_reset(); return; }
-
   const ButtonBinding *bind = find_binding(b);
-  if (!bind) return;
-  // Snapshot for the long_handler to potentially revert if this turns out
-  // to be a long press. Skipped for buttons with no long action.
-  if (bind->long_action != ACT_NONE) game_snapshot();
-  dispatch_action(bind->short_action);
+  if (bind) dispatch_action(bind->short_action);
 }
 
 static void long_handler(ClickRecognizerRef r, void *ctx) {
   ButtonId b = click_recognizer_get_button_id(r);
-  // Revert any short action that fired on press, then mark the latch so a
-  // trailing single_click on release skips its action.
-  game_undo_to_snapshot();
-  s_long_latch[b] = true;
   const ButtonBinding *bind = find_binding(b);
   if (bind) dispatch_action(bind->long_action);
 }
@@ -192,21 +158,18 @@ void input_touch_unsubscribe(void) {
 }
 #endif  // PBL_TOUCH
 
-// Buttons without a long_action use plain single_click (fires on press,
-// snappy). Buttons WITH a long_action use multi_click(count=1, last_only)
-// which fires on release after a short timeout — that way a held button
-// triggers long_click first (at the threshold) and sets the latch, so the
-// trailing multi_click on release sees the latch and skips the short action.
-// Plain single_click on the same button as long_click in this firmware fires
-// on press, applying the short action before long_click can latch.
 void input_click_config_provider(void *context) {
   for (size_t i = 0; i < NUM_BINDINGS; i++) {
     const ButtonBinding *b = &s_bindings[i];
-    if (b->long_action == ACT_NONE) {
-      window_single_click_subscribe(b->button, short_handler);
-    } else {
+    if (b->button == BUTTON_ID_BACK) {
+      // See file header for why BACK uses multi_click instead of single_click.
       window_multi_click_subscribe(b->button, 1, 1, 50, true, short_handler);
-      window_long_click_subscribe(b->button, LONG_PRESS_MS, long_handler, NULL);
+    } else {
+      window_single_click_subscribe(b->button, short_handler);
+      if (b->long_action != ACT_NONE) {
+        window_long_click_subscribe(b->button, LONG_PRESS_MS,
+                                    long_handler, NULL);
+      }
     }
   }
 }
