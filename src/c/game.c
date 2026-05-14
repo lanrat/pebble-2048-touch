@@ -1,0 +1,223 @@
+// Game logic: board, moves, scoring, persistence. See game.h.
+#include "game.h"
+#include "ui.h"
+
+uint8_t game_board[CELLS];
+uint32_t game_score;
+uint32_t game_high_score;
+bool game_is_over;
+bool game_is_won;
+
+// persist_storage keys. Don't reuse numbers across releases — old installs
+// may still have the old key written.
+#define PERSIST_KEY_HIGH_SCORE 1
+#define PERSIST_KEY_BOARD      2
+#define PERSIST_KEY_SCORE      3
+#define PERSIST_KEY_WON        4
+
+static int empty_count(void) {
+  int n = 0;
+  for (int i = 0; i < CELLS; i++) if (game_board[i] == 0) n++;
+  return n;
+}
+
+// Spawn a single tile in a uniformly random empty cell. 90% chance of a "2"
+// (log2=1), 10% chance of a "4" (log2=2) — matches the original 2048.
+static void spawn_tile(void) {
+  int empties = empty_count();
+  if (empties == 0) return;
+  int target = rand() % empties;
+  uint8_t value = ((rand() % 10) == 0) ? 2 : 1;
+  int k = 0;
+  for (int i = 0; i < CELLS; i++) {
+    if (game_board[i] == 0) {
+      if (k == target) { game_board[i] = value; return; }
+      k++;
+    }
+  }
+}
+
+// Slide `row` to the left, merging equal adjacent tiles. Returns true if the
+// row changed. This is the single primitive — other move directions reuse it
+// via row/column rotation (see game_move_right, _up, _down).
+//
+// merged_slot[] enforces the 2048 rule that a freshly-merged tile cannot merge
+// again in the same move: e.g. [2,2,4,_] -> [4,4,_,_], NOT [8,_,_,_]. The slot
+// becomes eligible again on the next move.
+//
+// Score increases by the resulting tile value (1u << new_log2). Reaching 2048
+// flips the sticky game_is_won flag.
+static bool compact_row_left(uint8_t *row) {
+  uint8_t out[GRID_N] = {0, 0, 0, 0};
+  int w = 0;
+  bool merged_slot[GRID_N] = {false, false, false, false};
+  for (int i = 0; i < GRID_N; i++) {
+    if (row[i] == 0) continue;
+    if (w > 0 && out[w - 1] == row[i] && !merged_slot[w - 1]) {
+      out[w - 1] += 1;  // log2 increment == doubling the tile value
+      merged_slot[w - 1] = true;
+      game_score += (1UL << out[w - 1]);
+      if (out[w - 1] == 11) game_is_won = true;  // 2^11 == 2048
+    } else {
+      out[w++] = row[i];
+    }
+  }
+  bool changed = false;
+  for (int i = 0; i < GRID_N; i++) {
+    if (row[i] != out[i]) changed = true;
+    row[i] = out[i];
+  }
+  return changed;
+}
+
+// get_*/put_* copy a row or column in/out of the board. Reading into a local
+// array lets compact_row_left work in-place regardless of direction.
+static void get_row(int r, uint8_t *row) {
+  for (int i = 0; i < GRID_N; i++) row[i] = game_board[r * GRID_N + i];
+}
+static void put_row(int r, const uint8_t *row) {
+  for (int i = 0; i < GRID_N; i++) game_board[r * GRID_N + i] = row[i];
+}
+static void get_col(int c, uint8_t *col) {
+  for (int i = 0; i < GRID_N; i++) col[i] = game_board[i * GRID_N + c];
+}
+static void put_col(int c, const uint8_t *col) {
+  for (int i = 0; i < GRID_N; i++) game_board[i * GRID_N + c] = col[i];
+}
+
+// Reverse a 4-element array in place. Used to repurpose compact_row_left for
+// rightward/downward moves by reversing -> compacting left -> reversing back.
+static void reverse4(uint8_t *a) {
+  uint8_t t;
+  t = a[0]; a[0] = a[3]; a[3] = t;
+  t = a[1]; a[1] = a[2]; a[2] = t;
+}
+
+bool game_move_left(void) {
+  bool changed = false;
+  uint8_t row[GRID_N];
+  for (int r = 0; r < GRID_N; r++) {
+    get_row(r, row);
+    if (compact_row_left(row)) { put_row(r, row); changed = true; }
+  }
+  return changed;
+}
+bool game_move_right(void) {
+  bool changed = false;
+  uint8_t row[GRID_N];
+  for (int r = 0; r < GRID_N; r++) {
+    get_row(r, row);
+    reverse4(row);
+    bool c = compact_row_left(row);
+    reverse4(row);
+    if (c) { put_row(r, row); changed = true; }
+  }
+  return changed;
+}
+bool game_move_up(void) {
+  bool changed = false;
+  uint8_t col[GRID_N];
+  for (int c = 0; c < GRID_N; c++) {
+    get_col(c, col);
+    if (compact_row_left(col)) { put_col(c, col); changed = true; }
+  }
+  return changed;
+}
+bool game_move_down(void) {
+  bool changed = false;
+  uint8_t col[GRID_N];
+  for (int c = 0; c < GRID_N; c++) {
+    get_col(c, col);
+    reverse4(col);
+    bool ch = compact_row_left(col);
+    reverse4(col);
+    if (ch) { put_col(c, col); changed = true; }
+  }
+  return changed;
+}
+
+// Cheap game-over check: any empty cell means a move is possible. On a full
+// board, the player can still move iff two equal tiles touch horizontally or
+// vertically (such a pair could be merged by sliding in that direction).
+static bool any_moves_available(void) {
+  if (empty_count() > 0) return true;
+  for (int r = 0; r < GRID_N; r++) {
+    for (int c = 0; c < GRID_N; c++) {
+      uint8_t v = game_board[r * GRID_N + c];
+      if (c + 1 < GRID_N && game_board[r * GRID_N + c + 1] == v) return true;
+      if (r + 1 < GRID_N && game_board[(r + 1) * GRID_N + c] == v) return true;
+    }
+  }
+  return false;
+}
+
+// Persist the in-progress game so it survives the app closing (or a crash).
+// High score is written separately so it survives game-over clearing.
+static void save_state(void) {
+  persist_write_data(PERSIST_KEY_BOARD, game_board, sizeof(game_board));
+  persist_write_int(PERSIST_KEY_SCORE, (int32_t)game_score);
+  persist_write_bool(PERSIST_KEY_WON, game_is_won);
+}
+
+static void clear_saved_state(void) {
+  persist_delete(PERSIST_KEY_BOARD);
+  persist_delete(PERSIST_KEY_SCORE);
+  persist_delete(PERSIST_KEY_WON);
+}
+
+void game_apply_move(bool (*move_fn)(void)) {
+  if (game_is_over) return;
+  bool was_won = game_is_won;  // rising edge for the "2048!" banner
+  bool changed = move_fn();
+  if (changed) {
+    spawn_tile();
+    if (game_score > game_high_score) {
+      game_high_score = game_score;
+      persist_write_int(PERSIST_KEY_HIGH_SCORE, (int32_t)game_high_score);
+    }
+    ui_update_score();
+    ui_mark_board_dirty();
+    save_state();
+  }
+  if (!any_moves_available()) {
+    game_is_over = true;
+    clear_saved_state();
+    ui_show_status(game_is_won ? "You win!" : "Game over");
+    vibes_double_pulse();
+  } else if (changed && game_is_won && !was_won) {
+    // First time crossing 2048 this game — celebrate once.
+    ui_show_status("2048!");
+    vibes_short_pulse();
+  }
+}
+
+void game_reset(void) {
+  for (int i = 0; i < CELLS; i++) game_board[i] = 0;
+  game_score = 0;
+  game_is_over = false;
+  game_is_won = false;
+  spawn_tile();
+  spawn_tile();
+  ui_update_score();
+  ui_hide_status();
+  ui_mark_board_dirty();
+}
+
+bool game_load_persisted(void) {
+  if (!persist_exists(PERSIST_KEY_BOARD)) return false;
+  int read = persist_read_data(PERSIST_KEY_BOARD, game_board, sizeof(game_board));
+  if (read != (int)sizeof(game_board)) return false;
+  game_score = (uint32_t)persist_read_int(PERSIST_KEY_SCORE);
+  game_is_won = persist_read_bool(PERSIST_KEY_WON);
+  game_is_over = false;
+  if (empty_count() == CELLS) return false;
+  ui_update_score();
+  ui_mark_board_dirty();
+  return true;
+}
+
+void game_init(void) {
+  if (persist_exists(PERSIST_KEY_HIGH_SCORE)) {
+    game_high_score = (uint32_t)persist_read_int(PERSIST_KEY_HIGH_SCORE);
+  }
+}

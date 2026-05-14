@@ -1,0 +1,26 @@
+{
+  "name": "2048-touch",
+  "author": "LANRAT",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "2048 Touch",
+    "uuid": "ee445bf9-8fc5-4d97-9295-bc19216fba4e",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "dummy"
+    ],
+    "resources": {
+      "media": []
+    }
+  }
+}
