@@ -3,6 +3,11 @@
 The 2048 sliding-tile game for Pebble smartwatches. Supports touch swipes on
 touch-capable models (emery) and physical buttons on the rest.
 
+Install from the app stores:
+
+- Core Devices: <https://apps.repebble.com/6df87b64b7174448a065ef54>
+- Rebble: <https://apps.rebble.io/en_US/application/6a0567d11cbe56000ae6c9a8>
+
 ## Store description
 
 Play the classic 2048 sliding-tile puzzle on your Pebble. Combine matching
