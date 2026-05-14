@@ -38,7 +38,6 @@ static void deinit(void) {
   input_touch_unsubscribe();
 #endif
   window_destroy(s_window);
-  ui_destroy_confirm_window();
 }
 
 int main(void) {

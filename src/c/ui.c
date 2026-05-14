@@ -6,6 +6,8 @@
 static Layer *s_board_layer;
 static TextLayer *s_score_layer;
 static TextLayer *s_status_layer;  // "Game over" / "You win!" / "2048!" banner
+static TextLayer *s_confirm_overlay;  // "Reset game?" prompt overlay
+static bool s_confirm_visible;
 
 // Backing storage for the score TextLayer. TextLayer doesn't copy strings, so
 // this buffer must outlive every set_text call.
@@ -94,13 +96,18 @@ typedef struct {
 
 static GridGeom compute_geom(GRect bounds) {
   GridGeom g;
-  g.gap = 3;
+  // gap=4 makes the grid exactly fit the supported display widths (144, 180,
+  // 200) with no leftover pixel sliver on the right. Math: (W - 5*gap) must
+  // divide evenly by 4; W=200 → cell=45; W=180 → cell=40; W=144 → cell=31.
+  g.gap = 4;
   // Use the smaller dimension so the grid stays square on any aspect ratio.
   int side = (bounds.size.w < bounds.size.h) ? bounds.size.w : bounds.size.h;
   g.cell = (side - g.gap * (GRID_N + 1)) / GRID_N;
   int grid = g.cell * GRID_N + g.gap * (GRID_N + 1);
+  // Centered horizontally; bottom-aligned vertically. Any leftover vertical
+  // space ends up as padding between the score row and the grid.
   g.ox = (bounds.size.w - grid) / 2;
-  g.oy = (bounds.size.h - grid) / 2;
+  g.oy = bounds.size.h - grid;
   return g;
 }
 
@@ -386,14 +393,15 @@ void ui_hide_status(void) {
 }
 
 // Build the layer hierarchy and either restore a saved game or start fresh.
-// Layout: score row at the top, board fills the middle, status banner at the
-// bottom (hidden until game over / 2048).
+// Layout: score row at top (full width), board fills the rest (full width,
+// grid bottom-aligned). Status banner is an opaque overlay floating over the
+// center of the board area, hidden until game over / 2048.
 void ui_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
 
-  const int score_h = 20;
-  const int status_h = 22;
+  const int score_h = 22;
+  const int status_h = 30;
 
   s_score_layer = text_layer_create(GRect(0, 0, bounds.size.w, score_h));
   text_layer_set_text_alignment(s_score_layer, GTextAlignmentCenter);
@@ -402,20 +410,44 @@ void ui_window_load(Window *window) {
   text_layer_set_text_color(s_score_layer, GColorBlack);
   layer_add_child(root, text_layer_get_layer(s_score_layer));
 
+  // Board fills the full width below the score, all the way to the bottom of
+  // the display. compute_geom bottom-aligns the grid within this rect.
   GRect board_rect = GRect(0, score_h, bounds.size.w,
-                           bounds.size.h - score_h - status_h);
+                           bounds.size.h - score_h);
   s_board_layer = layer_create(board_rect);
   layer_set_update_proc(s_board_layer, board_update_proc);
   layer_add_child(root, s_board_layer);
 
-  s_status_layer = text_layer_create(GRect(0, bounds.size.h - status_h,
+  // Status overlay: opaque band centered vertically over the board area.
+  // Added to root after the board layer so it draws on top.
+  int status_y = score_h + (bounds.size.h - score_h - status_h) / 2;
+  s_status_layer = text_layer_create(GRect(0, status_y,
                                            bounds.size.w, status_h));
   text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_background_color(s_status_layer, GColorClear);
+  text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_background_color(s_status_layer, GColorWhite);
   text_layer_set_text_color(s_status_layer, GColorBlack);
   layer_add_child(root, text_layer_get_layer(s_status_layer));
   layer_set_hidden(text_layer_get_layer(s_status_layer), true);
+
+  // Reset confirm overlay: full-width opaque band centered vertically over
+  // the board area, taller than the status banner since it has 4 lines.
+  // Added last so it draws above everything else. TextLayer has no native
+  // vertical centering — height is sized to the text and the rect itself is
+  // positioned so the box's center matches the board area's center.
+  const int confirm_h = 110;  // ~4 lines of GOTHIC_24_BOLD
+  int confirm_y = score_h + (bounds.size.h - score_h - confirm_h) / 2;
+  s_confirm_overlay = text_layer_create(GRect(0, confirm_y,
+                                              bounds.size.w, confirm_h));
+  text_layer_set_text(s_confirm_overlay,
+                      "Reset game?\n\nSELECT: yes\nother: no");
+  text_layer_set_text_alignment(s_confirm_overlay, GTextAlignmentCenter);
+  text_layer_set_font(s_confirm_overlay,
+                      fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_background_color(s_confirm_overlay, GColorWhite);
+  text_layer_set_text_color(s_confirm_overlay, GColorBlack);
+  layer_add_child(root, text_layer_get_layer(s_confirm_overlay));
+  layer_set_hidden(text_layer_get_layer(s_confirm_overlay), true);
 
   if (!game_load_persisted()) {
     game_reset();
@@ -427,65 +459,27 @@ void ui_window_unload(Window *window) {
   if (s_pop_handle)   { animation_unschedule(s_pop_handle);   s_pop_handle = NULL; }
   text_layer_destroy(s_score_layer);
   text_layer_destroy(s_status_layer);
+  text_layer_destroy(s_confirm_overlay);
   layer_destroy(s_board_layer);
 }
 
-// --- Reset confirmation modal ---
+// --- Reset confirmation overlay ---
 //
-// Pushed on long-press SELECT. SELECT confirms reset, any other button
-// dismisses. BACK is intentionally not registered — the system default (pop
-// window) already dismisses the prompt without exiting the app.
+// Floats on top of the board (added to root after the board layer). While
+// visible, input.c gates button events so they dismiss or confirm instead of
+// being treated as game moves. The TextLayer and flag are declared near the
+// other UI statics at the top of the file.
 
-static Window *s_confirm_window;
-static TextLayer *s_confirm_text_layer;
-
-static void confirm_yes_handler(ClickRecognizerRef r, void *ctx) {
-  window_stack_pop(true);
-  game_reset();
-}
-static void confirm_no_handler(ClickRecognizerRef r, void *ctx) {
-  window_stack_pop(true);
-}
-static void confirm_click_config(void *ctx) {
-  window_single_click_subscribe(BUTTON_ID_SELECT, confirm_yes_handler);
-  window_single_click_subscribe(BUTTON_ID_UP, confirm_no_handler);
-  window_single_click_subscribe(BUTTON_ID_DOWN, confirm_no_handler);
-}
-static void confirm_window_load(Window *w) {
-  Layer *root = window_get_root_layer(w);
-  GRect b = layer_get_bounds(root);
-  s_confirm_text_layer = text_layer_create(b);
-  text_layer_set_text(s_confirm_text_layer,
-                      "\nReset game?\n\nSELECT: yes\nother: no");
-  text_layer_set_text_alignment(s_confirm_text_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_confirm_text_layer,
-                      fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
-  text_layer_set_background_color(s_confirm_text_layer, GColorWhite);
-  text_layer_set_text_color(s_confirm_text_layer, GColorBlack);
-  layer_add_child(root, text_layer_get_layer(s_confirm_text_layer));
-}
-static void confirm_window_unload(Window *w) {
-  text_layer_destroy(s_confirm_text_layer);
-}
-
-// Lazy-allocate the confirm window the first time we need it and reuse it
-// thereafter. Pushed on top of the game window so the game state is preserved
-// underneath while the prompt is up.
 void ui_show_reset_confirm(void) {
-  if (!s_confirm_window) {
-    s_confirm_window = window_create();
-    window_set_click_config_provider(s_confirm_window, confirm_click_config);
-    window_set_window_handlers(s_confirm_window, (WindowHandlers){
-      .load = confirm_window_load,
-      .unload = confirm_window_unload,
-    });
-  }
-  window_stack_push(s_confirm_window, true);
+  layer_set_hidden(text_layer_get_layer(s_confirm_overlay), false);
+  s_confirm_visible = true;
 }
 
-void ui_destroy_confirm_window(void) {
-  if (s_confirm_window) {
-    window_destroy(s_confirm_window);
-    s_confirm_window = NULL;
-  }
+void ui_dismiss_reset_confirm(void) {
+  layer_set_hidden(text_layer_get_layer(s_confirm_overlay), true);
+  s_confirm_visible = false;
+}
+
+bool ui_reset_confirm_visible(void) {
+  return s_confirm_visible;
 }

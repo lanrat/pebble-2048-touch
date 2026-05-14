@@ -25,6 +25,9 @@ static void touch_handler(const TouchEvent *event, void *context) {
     case TouchEvent_Liftoff: {
       if (!s_touch_active) break;  // liftoff without a matching touchdown
       s_touch_active = false;
+      // Any touch dismisses the reset-confirm overlay; confirmation is
+      // SELECT-button only.
+      if (ui_reset_confirm_visible()) { ui_dismiss_reset_confirm(); break; }
       if (game_is_over) { game_reset(); break; }
       int16_t dx = event->x - s_touch_x0;
       int16_t dy = event->y - s_touch_y0;
@@ -66,31 +69,50 @@ void input_touch_unsubscribe(void) {
 // --- Button click handling ---
 //
 // While game-over banner is showing, any button resets the game.
+// While the reset-confirm overlay is showing, SELECT confirms reset and any
+// other button (or touch) dismisses; no game move is applied.
+
+// If the reset confirm overlay is visible, dismiss it. Returns true if the
+// event was handled (caller should return). Pass is_select=true to also
+// trigger reset on dismiss.
+static bool consume_for_confirm(bool is_select) {
+  if (!ui_reset_confirm_visible()) return false;
+  ui_dismiss_reset_confirm();
+  if (is_select) game_reset();
+  return true;
+}
 
 static void up_click_handler(ClickRecognizerRef r, void *ctx) {
+  if (consume_for_confirm(false)) return;
   if (game_is_over) { game_reset(); return; }
   game_apply_move(game_move_up);
 }
 static void down_click_handler(ClickRecognizerRef r, void *ctx) {
+  if (consume_for_confirm(false)) return;
   if (game_is_over) { game_reset(); return; }
   game_apply_move(game_move_down);
 }
 
-// SELECT: short = move right, long = show reset confirm.
+// SELECT: short = move right (or confirm reset if overlay visible),
+//         long  = show reset confirm overlay.
 static void select_short_handler(ClickRecognizerRef r, void *ctx) {
+  if (consume_for_confirm(true)) return;
   if (game_is_over) { game_reset(); return; }
   game_apply_move(game_move_right);
 }
 static void select_long_handler(ClickRecognizerRef r, void *ctx) {
+  if (ui_reset_confirm_visible()) return;  // already showing
   ui_show_reset_confirm();
 }
 
-// BACK: short = move left, long = exit app.
+// BACK: short = move left (or dismiss overlay), long = exit app.
 static void back_short_handler(ClickRecognizerRef r, void *ctx) {
+  if (consume_for_confirm(false)) return;
   if (game_is_over) { game_reset(); return; }
   game_apply_move(game_move_left);
 }
 static void back_long_handler(ClickRecognizerRef r, void *ctx) {
+  if (ui_reset_confirm_visible()) { ui_dismiss_reset_confirm(); return; }
   window_stack_pop_all(true);
 }
 

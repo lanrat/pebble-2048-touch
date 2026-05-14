@@ -24,9 +24,10 @@ void ui_animate_move(const MoveAnim *anim);
 void ui_show_status(const char *text);
 void ui_hide_status(void);
 
-// Push the modal "Reset game?" confirmation window. SELECT confirms (calls
-// game_reset()); any other button cancels and resumes.
+// Show the "Reset game?" overlay on top of the board. Dismissed by
+// ui_dismiss_reset_confirm(). While visible, ui_reset_confirm_visible()
+// returns true and input.c routes button events to dismiss / confirm
+// instead of treating them as game moves.
 void ui_show_reset_confirm(void);
-
-// Free the confirm window if it was lazily created. Call from deinit.
-void ui_destroy_confirm_window(void);
+void ui_dismiss_reset_confirm(void);
+bool ui_reset_confirm_visible(void);
