@@ -6,7 +6,7 @@
 static Layer *s_board_layer;
 static TextLayer *s_score_layer;
 static TextLayer *s_status_layer;  // "Game over" / "You win!" / "2048!" banner
-static TextLayer *s_confirm_overlay;  // "Reset game?" prompt overlay
+static TextLayer *s_confirm_overlay;  // "Reset Game?" prompt overlay
 static bool s_confirm_visible;
 
 // Backing storage for the score TextLayer. TextLayer doesn't copy strings, so
@@ -373,6 +373,23 @@ void ui_animate_move(const MoveAnim *anim) {
   animation_schedule(a);
 }
 
+// Stop any active slide or pop animation. The animation's teardown clears
+// all its state and marks the layer dirty, so the next redraw renders
+// game_board cleanly. Used by game_undo_to_snapshot to revert mid-animation.
+void ui_cancel_animations(void) {
+  if (s_slide_handle) {
+    animation_unschedule(s_slide_handle);
+    s_slide_handle = NULL;
+  }
+  if (s_pop_handle) {
+    animation_unschedule(s_pop_handle);
+    s_pop_handle = NULL;
+  }
+  s_slide_active = false;
+  s_pop_active = false;
+  s_spawn_idx = -1;
+}
+
 void ui_update_score(void) {
   snprintf(s_score_buf, sizeof(s_score_buf), "%lu / %lu",
            (unsigned long)game_score, (unsigned long)game_high_score);
@@ -440,7 +457,7 @@ void ui_window_load(Window *window) {
   s_confirm_overlay = text_layer_create(GRect(0, confirm_y,
                                               bounds.size.w, confirm_h));
   text_layer_set_text(s_confirm_overlay,
-                      "Reset game?\n\nSELECT: yes\nother: no");
+                      "Reset Game?\n\nSELECT: yes\nother: no");
   text_layer_set_text_alignment(s_confirm_overlay, GTextAlignmentCenter);
   text_layer_set_font(s_confirm_overlay,
                       fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));

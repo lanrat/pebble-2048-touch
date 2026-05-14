@@ -13,6 +13,10 @@ void ui_window_unload(Window *window);
 void ui_update_score(void);
 void ui_mark_board_dirty(void);
 
+// Cancel any in-flight slide / pop animations. Used by game_undo_to_snapshot
+// so a reverted move doesn't leave a trailing animation playing.
+void ui_cancel_animations(void);
+
 // Kick off a slide animation for the given move. Tiles in `anim->prev_value`
 // slide from their source cells to `anim->dest[src]`. ~100ms; the board is
 // redrawn from game_board after the animation completes (so a newly spawned
@@ -24,7 +28,7 @@ void ui_animate_move(const MoveAnim *anim);
 void ui_show_status(const char *text);
 void ui_hide_status(void);
 
-// Show the "Reset game?" overlay on top of the board. Dismissed by
+// Show the "Reset Game?" overlay on top of the board. Dismissed by
 // ui_dismiss_reset_confirm(). While visible, ui_reset_confirm_visible()
 // returns true and input.c routes button events to dismiss / confirm
 // instead of treating them as game moves.

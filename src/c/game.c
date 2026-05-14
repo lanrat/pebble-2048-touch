@@ -261,6 +261,66 @@ void game_apply_move(bool (*move_fn)(MoveAnim *)) {
   }
 }
 
+// --- Snapshot/undo support for short-press / long-press disambiguation ---
+//
+// input.c calls game_snapshot() before a single_click move is applied. If the
+// same button later fires a long_click (i.e. the user was actually holding),
+// game_undo_to_snapshot() reverts the move so only the long action runs.
+
+static uint8_t  s_snapshot_board[CELLS];
+static uint32_t s_snapshot_score;
+static bool     s_snapshot_won;
+static bool     s_snapshot_valid;
+static uint32_t s_snapshot_at_ms;  // wall-clock time when snapshot was taken
+
+// Snapshot freshness window in ms. Long-click fires at 500 ms, so a snapshot
+// from the current press is at most ~500 ms old when undo is considered.
+// Older snapshots (left over from a prior short press) must not be undone.
+#define SNAPSHOT_FRESH_MS 600
+
+static uint32_t now_ms_u32(void) {
+  time_t s;
+  uint16_t ms;
+  time_ms(&s, &ms);
+  return (uint32_t)s * 1000u + ms;
+}
+
+void game_snapshot(void) {
+  for (int i = 0; i < CELLS; i++) s_snapshot_board[i] = game_board[i];
+  s_snapshot_score = game_score;
+  s_snapshot_won = game_is_won;
+  s_snapshot_valid = true;
+  s_snapshot_at_ms = now_ms_u32();
+}
+
+void game_undo_to_snapshot(void) {
+  if (!s_snapshot_valid) return;
+  // Only undo if the snapshot was taken during the CURRENT press. A stale
+  // snapshot from an earlier press would revert too far.
+  if (now_ms_u32() - s_snapshot_at_ms > SNAPSHOT_FRESH_MS) {
+    s_snapshot_valid = false;
+    return;
+  }
+  s_snapshot_valid = false;
+  for (int i = 0; i < CELLS; i++) game_board[i] = s_snapshot_board[i];
+  game_score = s_snapshot_score;
+  game_is_won = s_snapshot_won;
+  game_is_over = false;  // we just undid the move that might have ended it
+  ui_cancel_animations();
+  ui_update_score();
+  ui_hide_status();
+  ui_mark_board_dirty();
+  // Persist the reverted state so a subsequent app exit doesn't keep the
+  // briefly-applied move.
+  if (empty_count() == CELLS) {
+    // Defensive: never happens in practice (snapshot pre-spawn).
+    return;
+  }
+  persist_write_data(PERSIST_KEY_BOARD, game_board, sizeof(game_board));
+  persist_write_int(PERSIST_KEY_SCORE, (int32_t)game_score);
+  persist_write_bool(PERSIST_KEY_WON, game_is_won);
+}
+
 void game_reset(void) {
   for (int i = 0; i < CELLS; i++) game_board[i] = 0;
   game_score = 0;
