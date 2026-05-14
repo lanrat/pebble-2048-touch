@@ -96,18 +96,27 @@ typedef struct {
 
 static GridGeom compute_geom(GRect bounds) {
   GridGeom g;
-  // gap=4 makes the grid exactly fit the supported display widths (144, 180,
-  // 200) with no leftover pixel sliver on the right. Math: (W - 5*gap) must
-  // divide evenly by 4; W=200 → cell=45; W=180 → cell=40; W=144 → cell=31.
+  // gap=4 makes the grid exactly fit the supported rectangular display widths
+  // (144, 200) with no leftover pixel sliver on the right.
   g.gap = 4;
-  // Use the smaller dimension so the grid stays square on any aspect ratio.
   int side = (bounds.size.w < bounds.size.h) ? bounds.size.w : bounds.size.h;
+#ifdef PBL_ROUND
+  // Round displays: inscribe the grid inside the visible circle. A square
+  // inscribed in a circle of diameter D has side ≈ D * sqrt(2)/2 ≈ D*0.707.
+  // We use 70/100 to leave a tiny margin so corner tiles aren't clipped.
+  side = side * 70 / 100;
+#endif
   g.cell = (side - g.gap * (GRID_N + 1)) / GRID_N;
   int grid = g.cell * GRID_N + g.gap * (GRID_N + 1);
-  // Centered horizontally; bottom-aligned vertically. Any leftover vertical
-  // space ends up as padding between the score row and the grid.
   g.ox = (bounds.size.w - grid) / 2;
+#ifdef PBL_ROUND
+  // Center vertically so the grid sits at the display's center — corners are
+  // furthest from the circle edge there.
+  g.oy = (bounds.size.h - grid) / 2;
+#else
+  // Bottom-align so leftover space pads between the score row and the grid.
   g.oy = bounds.size.h - grid;
+#endif
   return g;
 }
 
@@ -393,9 +402,14 @@ void ui_hide_status(void) {
 }
 
 // Build the layer hierarchy and either restore a saved game or start fresh.
-// Layout: score row at top (full width), board fills the rest (full width,
-// grid bottom-aligned). Status banner is an opaque overlay floating over the
-// center of the board area, hidden until game over / 2048.
+// Layout differs by display shape:
+//  - Rectangular: score row at top, board fills the rest with the grid
+//    bottom-aligned within it.
+//  - Round: board layer spans the full window so the grid can center at the
+//    display center (where it stays inside the visible circle). The score
+//    row sits above the grid; the grid is sized small enough by
+//    compute_geom() to leave room for it without overlap.
+// Status / reset-confirm overlays float on top of everything, centered.
 void ui_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
@@ -408,19 +422,25 @@ void ui_window_load(Window *window) {
   text_layer_set_font(s_score_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_background_color(s_score_layer, GColorClear);
   text_layer_set_text_color(s_score_layer, GColorBlack);
-  layer_add_child(root, text_layer_get_layer(s_score_layer));
 
-  // Board fills the full width below the score, all the way to the bottom of
-  // the display. compute_geom bottom-aligns the grid within this rect.
+#ifdef PBL_ROUND
+  // Board layer = full window so compute_geom can center the grid at the
+  // display center, where the circle is most forgiving.
+  GRect board_rect = bounds;
+#else
+  // Rectangular: board sits below the score row.
   GRect board_rect = GRect(0, score_h, bounds.size.w,
                            bounds.size.h - score_h);
+#endif
   s_board_layer = layer_create(board_rect);
   layer_set_update_proc(s_board_layer, board_update_proc);
   layer_add_child(root, s_board_layer);
+  // Score is added AFTER the board layer so it draws on top — on round, the
+  // board covers the score area too, and we want the score text visible.
+  layer_add_child(root, text_layer_get_layer(s_score_layer));
 
-  // Status overlay: opaque band centered vertically over the board area.
-  // Added to root after the board layer so it draws on top.
-  int status_y = score_h + (bounds.size.h - score_h - status_h) / 2;
+  // Status overlay: opaque band centered vertically over the display.
+  int status_y = (bounds.size.h - status_h) / 2;
   s_status_layer = text_layer_create(GRect(0, status_y,
                                            bounds.size.w, status_h));
   text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
@@ -430,13 +450,9 @@ void ui_window_load(Window *window) {
   layer_add_child(root, text_layer_get_layer(s_status_layer));
   layer_set_hidden(text_layer_get_layer(s_status_layer), true);
 
-  // Reset confirm overlay: full-width opaque band centered vertically over
-  // the board area, taller than the status banner since it has 4 lines.
-  // Added last so it draws above everything else. TextLayer has no native
-  // vertical centering — height is sized to the text and the rect itself is
-  // positioned so the box's center matches the board area's center.
+  // Reset confirm overlay: taller opaque band centered vertically.
   const int confirm_h = 110;  // ~4 lines of GOTHIC_24_BOLD
-  int confirm_y = score_h + (bounds.size.h - score_h - confirm_h) / 2;
+  int confirm_y = (bounds.size.h - confirm_h) / 2;
   s_confirm_overlay = text_layer_create(GRect(0, confirm_y,
                                               bounds.size.w, confirm_h));
   text_layer_set_text(s_confirm_overlay,
