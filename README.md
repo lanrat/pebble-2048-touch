@@ -1,6 +1,6 @@
 # 2048 for Pebble
 
-![2048 for Pebble](store_screenshots/banner.jpeg)
+![2048 for Pebble](store_screenshots/banner.png)
 
 The 2048 sliding-tile game for Pebble smartwatches. Supports touch swipes on
 touch-capable models (emery) and physical buttons on the rest.
